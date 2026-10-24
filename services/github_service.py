@@ -279,4 +279,36 @@ def check_github_auth():
         "reset_timestamp": core.get("reset", "Unknown"),
     }
 
+def get_file_content(owner, repo, path, branch="main"):
+    """Fetch and decode a text file from a public GitHub repository."""
+    import base64
+    from urllib.parse import quote
+
+    encoded_path = quote(path, safe="/")
+
+    result = github_get(
+        f"repos/{owner}/{repo}/contents/{encoded_path}",
+        params={"ref": branch},
+    )
+
+    if not isinstance(result, dict):
+        raise ValueError("GitHub returned an unexpected response.")
+
+    if result.get("type") != "file":
+        raise ValueError("The selected path is not a file.")
+
+    content = result.get("content", "")
+    encoding = result.get("encoding", "")
+
+    if encoding != "base64" or not content:
+        raise ValueError("This file cannot be previewed as ordinary text.")
+
+    try:
+        return base64.b64decode(content).decode(
+            "utf-8",
+            errors="replace",
+        )
+    except Exception as error:
+        raise ValueError("Could not decode this file.") from error
+
 

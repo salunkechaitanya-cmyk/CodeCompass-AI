@@ -12,7 +12,6 @@ from services.github_service import (
     parse_repo_url,
     get_file_content,
     get_text_file_for_qa,
-    check_github_auth,
     
 )
 
