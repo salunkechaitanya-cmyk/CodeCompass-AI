@@ -1,0 +1,19 @@
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Secrets
+.streamlit/secrets.toml
+.env
+.env.*
+
+# IDE and system files
+.DS_Store
+.vscode/
+
+# Backups
+app_backup.py
+app_before_qa.py
