@@ -11,6 +11,9 @@ from services.github_service import (
     get_open_issues,
     parse_repo_url,
     get_file_content,
+    get_text_file_for_qa,
+    check_github_auth,
+    
 )
 
 from services.file_explainer import explain_file
@@ -32,7 +35,16 @@ st.set_page_config(
     page_icon="🧭",
     layout="wide",
 )
-
+if st.button("Check GitHub connection"):
+    try:
+        result = check_github_auth()
+        st.write("Token configured:", result["token_present"])
+        st.write("HTTP status:", result["http_status"])
+        st.write("API request limit:", result["rate_limit"])
+        st.write("Requests remaining:", result["remaining"])
+        st.write("Reset timestamp:", result["reset_timestamp"])
+    except Exception as error:
+        st.error(f"GitHub diagnostic failed: {error}")
 
 # --------------------------------------------------
 # DESIGN
@@ -597,7 +609,6 @@ if st.session_state.cc_repo_data:
 
     # AI ASSISTANT
     
-    # AI ASSISTANT
     
     # AI ASSISTANT
     with tabs[6]:
@@ -629,29 +640,71 @@ if st.session_state.cc_repo_data:
                         tree = get_file_tree(owner, repo, branch)
 
                         if not isinstance(tree, list):
-                            st.error("Could not load the repository file tree.")
-                            st.stop()
+                            st.error(
+                                "Could not load the repository file tree."
+                            )
+                        else:
+                            supported_extensions = (
+                                ".py", ".md", ".txt", ".js", ".ts",
+                                ".jsx", ".tsx", ".html", ".css",
+                                ".json", ".yml", ".yaml", ".toml",
+                                ".java", ".c", ".cpp", ".h", ".go",
+                                ".rs", ".php", ".rb", ".sh",
+                            )
 
-                        files = {}
-                        supported_extensions = (
-                            ".py", ".md", ".txt", ".js", ".ts",
-                            ".jsx", ".tsx", ".html", ".css",
-                            ".json", ".yml", ".yaml", ".toml",
-                        )
+                            # Prefer important project files first.
+                            priority_names = (
+                                "readme.md",
+                                "pyproject.toml",
+                                "requirements.txt",
+                                "package.json",
+                                "main.py",
+                                "app.py",
+                                "index.js",
+                                "index.ts",
+                            )
 
-                        for item in tree:
-                            if not isinstance(item, dict):
-                                continue
+                            candidates = []
 
-                            path = item.get("path", "")
+                            for item in tree:
+                                if not isinstance(item, dict):
+                                    continue
 
-                            if (
-                                item.get("type") == "blob"
-                                and path.lower().endswith(supported_extensions)
-                            ):
-                                content = get_file_content(
-                                    owner, repo, path, branch
+                                path = item.get("path", "")
+
+                                if (
+                                    item.get("type") == "blob"
+                                    and path.lower().endswith(
+                                        supported_extensions
+                                    )
+                                ):
+                                    candidates.append(path)
+
+                            candidates.sort(
+                                key=lambda path: (
+                                    0
+                                    if path.split("/")[-1].lower()
+                                    in priority_names
+                                    else 1,
+                                    path.count("/"),
+                                    path.lower(),
                                 )
+                            )
+
+                            # Load at most 12 files per question.
+                            files = {}
+
+                            for path in candidates[:12]:
+                                try:
+                                    content = get_text_file_for_qa(
+                                        owner,
+                                        repo,
+                                        path,
+                                        branch,
+                                        max_chars=6000,
+                                    )
+                                except Exception:
+                                    continue
 
                                 if (
                                     isinstance(content, str)
@@ -659,85 +712,79 @@ if st.session_state.cc_repo_data:
                                 ):
                                     files[path] = content
 
-                    if not files:
-                        st.warning(
-                            "No readable text files were found "
-                            "in this repository."
-                        )
-
-                    else:
-                        with st.spinner("Searching repository..."):
-                            results = search_repository(
-                                question.strip(),
-                                files,
-                                max_results=10,
-                            )
-
-                        # Use matching lines when available.
-                        if results:
-                            context_parts = []
-
-                            for result in results:
-                                context_parts.append(
-                                    f"File: {result['path']}\n"
-                                    f"Line {result['line_number']}: "
-                                    f"{result['line']}"
+                            if not files:
+                                st.warning(
+                                    "No readable text files were found. "
+                                    "Try a public repository with source "
+                                    "code or a README file."
                                 )
+                            else:
+                                with st.spinner(
+                                    "Searching repository..."
+                                ):
+                                    results = search_repository(
+                                        question.strip(),
+                                        files,
+                                        max_results=10,
+                                    )
 
-                            context = "\n\n".join(context_parts)
+                                context_parts = []
 
-                            st.markdown("### 🔎 Relevant code")
+                                if results:
+                                    st.markdown("### 🔎 Relevant code")
 
-                            for result in results:
-                                st.caption(
-                                    f"{result['path']} — "
-                                    f"line {result['line_number']}"
-                                )
-                                st.code(result["line"])
+                                    for result in results:
+                                        path = result.get(
+                                            "path", "Unknown file"
+                                        )
+                                        line_number = result.get(
+                                            "line_number", "?"
+                                        )
+                                        line = result.get("line", "")
 
-                        else:
-                            # Fall back to actual repository contents
-                            # if keyword search finds no matching lines.
-                            context_parts = []
+                                        context_parts.append(
+                                            f"File: {path}\n"
+                                            f"Line {line_number}: {line}"
+                                        )
 
-                            for path, content in list(files.items())[:8]:
-                                context_parts.append(
-                                    f"File: {path}\n{content[:2500]}"
-                                )
+                                        st.caption(
+                                            f"{path} — line {line_number}"
+                                        )
+                                        st.code(line)
+                                else:
+                                    st.info(
+                                        "No exact keyword matches found. "
+                                        "Using the available project files."
+                                    )
 
-                            context = "\n\n".join(context_parts)
+                                    for path, content in list(
+                                        files.items()
+                                    )[:5]:
+                                        context_parts.append(
+                                            f"File: {path}\n"
+                                            f"{content[:2500]}"
+                                        )
 
-                            st.info(
-                                "No exact keyword matches found. "
-                                "The assistant will use available "
-                                "repository files to answer."
-                            )
+                                context = "\n\n".join(context_parts)
 
-                        if not context.strip():
-                            st.warning(
-                                "No repository context is available "
-                                "to answer this question."
-                            )
-                        else:
-                            with st.spinner("Generating AI answer..."):
-                                answer = answer_repository_question(
-                                    question.strip(),
-                                    context,
-                                )
+                                if not context.strip():
+                                    st.warning(
+                                        "No repository context is "
+                                        "available for this question."
+                                    )
+                                else:
+                                    with st.spinner(
+                                        "Generating AI answer..."
+                                    ):
+                                        answer = (
+                                            answer_repository_question(
+                                                question.strip(),
+                                                context,
+                                            )
+                                        )
 
-                            st.markdown("### 💡 Answer")
-                            display_answer(answer)
+                                    st.markdown("### 💡 Answer")
+                                    display_answer(answer)
 
                 except Exception as error:
                     st.error(f"AI Assistant error: {error}")
-
-
-# --------------------------------------------------
-# FOOTER
-# --------------------------------------------------
-
-st.divider()
-st.caption(
-    "🧭 CodeCompass • Understand any repository. "
-    "Start contributing with confidence."
-)

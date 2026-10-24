@@ -65,49 +65,91 @@ def get_headers():
     return headers
 
 
+
+
 def github_get(endpoint, params=None):
-    """Request data from the GitHub API."""
+    """Send an authenticated request to the GitHub API."""
+    import os
+    import streamlit as st
+    import requests
+
     url = f"{GITHUB_API}/{endpoint.lstrip('/')}"
+
+    try:
+        token = st.secrets.get("GITHUB_TOKEN", "")
+    except Exception:
+        token = ""
+
+    token = token or os.getenv("GITHUB_TOKEN", "")
+
+    headers = get_headers().copy()
+
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
 
     try:
         response = requests.get(
             url,
-            headers=get_headers(),
+            headers=headers,
             params=params,
             timeout=20,
         )
 
         if response.status_code == 401:
             raise ValueError(
-                "GitHub rejected the request. Check your GitHub token."
+                "GitHub rejected the token. Check that GITHUB_TOKEN "
+                "is valid and has not expired."
             )
 
         if response.status_code == 403:
-            if response.headers.get("X-RateLimit-Remaining") == "0":
-                raise ValueError(
-                    "GitHub API rate limit reached. Please wait and retry."
+            remaining = response.headers.get(
+                "X-RateLimit-Remaining"
+            )
+            reset_time = response.headers.get(
+                "X-RateLimit-Reset"
+            )
+
+            if remaining == "0":
+                message = (
+                    "GitHub API rate limit reached. "
+                    "Check your token and wait for the reset time."
                 )
-            raise ValueError("GitHub denied the request. Try again later.")
+
+                if reset_time:
+                    message += (
+                        f" Reset timestamp: {reset_time}."
+                    )
+
+                raise ValueError(message)
+
+            raise ValueError(
+                "GitHub denied the request. Check token permissions "
+                "or GitHub's abuse-rate-limit response."
+            )
 
         if response.status_code == 404:
             raise ValueError(
-                "Repository or resource not found. Check the URL and "
-                "ensure the repository is public."
+                "Repository or resource not found. Check the URL "
+                "and ensure the repository is public."
             )
 
         response.raise_for_status()
         return response.json()
 
     except requests.exceptions.Timeout as error:
-        raise ValueError("GitHub took too long to respond.") from error
+        raise ValueError(
+            "GitHub took too long to respond. Try again."
+        ) from error
 
     except requests.exceptions.ConnectionError as error:
         raise ValueError(
-            "Could not connect to GitHub. Check your internet connection."
+            "Could not connect to GitHub. Check your internet."
         ) from error
 
     except requests.exceptions.HTTPError as error:
-        raise ValueError(f"GitHub HTTP error: {error}") from error
+        raise ValueError(
+            f"GitHub HTTP error: {error}"
+        ) from error
 
 
 def get_repo_data(repo_url):
@@ -198,47 +240,43 @@ def get_open_issues(owner, repo, limit=20):
         if "pull_request" not in issue
     ]
 
+def check_github_auth():
+    """Safely check whether GitHub authentication is working."""
+    import os
+    import requests
+    import streamlit as st
 
-def get_file_content(owner, repo, path, branch="main"):
-    """Fetch and decode a text file."""
-    encoded_path = quote(path, safe="/")
+    try:
+        token = st.secrets.get("GITHUB_TOKEN", "")
+    except Exception:
+        token = ""
 
-    result = github_get(
-        f"repos/{owner}/{repo}/contents/{encoded_path}",
-        params={"ref": branch},
+    token = token or os.getenv("GITHUB_TOKEN", "")
+
+    headers = get_headers().copy()
+
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    response = requests.get(
+        "https://api.github.com/rate_limit",
+        headers=headers,
+        timeout=15,
     )
 
-    if not isinstance(result, dict):
-        raise ValueError("GitHub returned an unexpected response.")
-
-    if result.get("type") != "file":
-        raise ValueError("The selected path is not a file.")
-
-    content = result.get("content", "")
-    encoding = result.get("encoding", "")
-
-    if encoding != "base64" or not content:
-        raise ValueError("This file cannot be previewed as ordinary text.")
-
     try:
-        return base64.b64decode(content).decode(
-            "utf-8",
-            errors="replace",
-        )
-    except Exception as error:
-        raise ValueError("Could not decode this file.") from error
+        data = response.json()
+    except ValueError:
+        data = {}
+
+    core = data.get("resources", {}).get("core", {})
+
+    return {
+        "token_present": bool(token),
+        "http_status": response.status_code,
+        "rate_limit": core.get("limit", "Unknown"),
+        "remaining": core.get("remaining", "Unknown"),
+        "reset_timestamp": core.get("reset", "Unknown"),
+    }
 
 
-def get_text_file_for_qa(
-    owner, repo, path, branch="main", max_chars=12000
-):
-    """Return text content for repository Q&A."""
-    try:
-        content = get_file_content(owner, repo, path, branch)
-    except Exception:
-        return ""
-
-    if not isinstance(content, str):
-        return ""
-
-    return content[:max_chars]
