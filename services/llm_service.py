@@ -1,15 +1,23 @@
 
 import os
 import streamlit as st
+from huggingface_hub import InferenceClient
+
+
+def get_hf_token():
+    """Read the Hugging Face token from Streamlit Secrets or environment."""
+    try:
+        token = st.secrets.get("HF_TOKEN", "")
+    except Exception:
+        token = ""
+
+    return token or os.getenv("HF_TOKEN", "")
 
 
 def answer_repository_question(question, context):
-    """
-    Answer a question using repository context.
-    Supports context as a dictionary, list, or string.
-    """
+    """Answer a CodeCompass question using an open-weight model."""
 
-    if not question or not str(question).strip():
+    if not isinstance(question, str) or not question.strip():
         return "Please enter a question."
 
     if isinstance(context, dict):
@@ -18,9 +26,7 @@ def answer_repository_question(question, context):
             for path, content in context.items()
         )
     elif isinstance(context, list):
-        context_text = "\n\n".join(
-            str(item) for item in context
-        )
+        context_text = "\n\n".join(str(item) for item in context)
     elif isinstance(context, str):
         context_text = context
     else:
@@ -32,39 +38,62 @@ def answer_repository_question(question, context):
             "Please analyze a repository and try again."
         )
 
-    api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+    token = get_hf_token()
 
-    if not api_key:
+    if not token:
         return (
-            "Repository matches were found, but no AI API key is configured. "
-            "Set OPENAI_API_KEY in your Streamlit secrets or environment."
+            "Hugging Face token not found. "
+            "Add HF_TOKEN to Streamlit Secrets."
         )
+
+    # A model served by a compatible Hugging Face inference provider.
+    model = os.getenv(
+        "HF_MODEL",
+        "Qwen/Qwen2.5-Coder-7B-Instruct",
+    )
 
     try:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=api_key)
-
-        response = client.responses.create(
-            model="gpt-4.1-mini",
-            instructions=(
-                "You are CodeCompass, a beginner-friendly programming assistant. "
-                "Answer questions using the supplied repository context. "
-                "Explain technical concepts simply. If the context does not "
-                "contain enough information, say so instead of inventing details."
-            ),
-            input=(
-                f"User question:\n{question}\n\n"
-                f"Repository context:\n{context_text[:20000]}"
-            ),
+        client = InferenceClient(
+            model=model,
+            token=token,
+            timeout=60,
         )
 
-        return response.output_text
-
-    except ImportError:
-        return (
-            "The OpenAI package is missing. Install it with: "
-            "pip install openai"
+        response = client.chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are CodeCompass, a beginner-friendly "
+                        "programming assistant. Answer using the "
+                        "provided repository context. Explain code "
+                        "clearly. If the context is insufficient, "
+                        "say so instead of inventing details."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Question:\n{question}\n\n"
+                        f"Repository context:\n{context_text[:18000]}"
+                    ),
+                },
+            ],
+            max_tokens=700,
+            temperature=0.2,
         )
+
+        answer = response.choices[0].message.content
+
+        if not answer:
+            return "The model returned an empty answer. Please try again."
+
+        return answer
+
     except Exception as error:
-        return f"AI answer failed: {error}"
+        return (
+            "The Hugging Face model request failed. Check that your "
+            "token has inference permissions and that the selected "
+            "model is available through your inference provider. "
+            f"Details: {error}"
+        )
