@@ -1,6 +1,4 @@
 
-import re
-
 import streamlit as st
 
 from services.github_service import (
@@ -16,8 +14,18 @@ from services.github_service import (
 )
 
 from services.file_explainer import explain_file
-from services.github_service import get_text_file_for_qa
 from services.repository_qa import search_repository
+from services.llm_service import answer_repository_question
+from services.contribution_guide import (
+    get_beginner_issues,
+    search_global_beginner_issues,
+    make_contribution_steps,
+)
+
+
+# --------------------------------------------------
+# PAGE CONFIGURATION
+# --------------------------------------------------
 
 st.set_page_config(
     page_title="CodeCompass",
@@ -25,525 +33,711 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("🧭 CodeCompass")
-st.subheader("Understand any repository. Start contributing with confidence.")
-st.write(
-    "Explore public GitHub repositories and understand them "
-    "in beginner-friendly language."
+
+# --------------------------------------------------
+# DESIGN
+# --------------------------------------------------
+
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background: #111318;
+        color: #f3f4f8;
+    }
+
+    .block-container {
+        max-width: 1250px;
+        padding-top: 2rem;
+        padding-bottom: 3rem;
+    }
+
+    .cc-hero {
+        padding: 34px;
+        border: 1px solid #34364a;
+        border-radius: 20px;
+        background: linear-gradient(125deg, #20243a, #171923 65%, #28203d);
+        margin-bottom: 25px;
+    }
+
+    .cc-brand {
+        color: #b3a5ff;
+        font-size: 14px;
+        font-weight: 800;
+        letter-spacing: 3px;
+    }
+
+    .cc-heading {
+        font-size: 40px;
+        line-height: 1.2;
+        font-weight: 800;
+        margin-top: 18px;
+        color: #ffffff;
+    }
+
+    .cc-accent {
+        color: #b3a5ff;
+    }
+
+    .cc-description {
+        color: #c0c4d5;
+        font-size: 16px;
+        line-height: 1.8;
+        max-width: 800px;
+        margin-top: 15px;
+    }
+
+    div[data-testid="stMetric"] {
+        background: #1a1d27;
+        border: 1px solid #343746;
+        border-radius: 12px;
+        padding: 14px;
+    }
+
+    div[data-testid="stTextInput"] input,
+    div[data-testid="stTextArea"] textarea {
+        background: #191c25;
+        border: 1px solid #454b60;
+        border-radius: 10px;
+    }
+
+    div.stButton > button {
+        border-radius: 10px;
+        min-height: 42px;
+        font-weight: 600;
+    }
+
+    .cc-card {
+        background: #1a1d27;
+        border: 1px solid #343746;
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 12px;
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
-repo_url = st.text_input(
-    "GitHub repository URL",
-    placeholder="https://github.com/owner/repository",
-)
 
-if st.button("Analyze Repository", type="primary"):
-    if not repo_url.strip():
-        st.warning("Please enter a GitHub repository URL.")
-    else:
-        try:
-            with st.spinner("Analyzing the GitHub repository..."):
-                data = get_repo_data(repo_url)
-                owner, repo = parse_repo_url(repo_url)
+# --------------------------------------------------
+# HELPERS
+# --------------------------------------------------
 
-                readme = get_readme(owner, repo)
-                languages = get_languages(owner, repo)
-                tree = get_file_tree(
-                    owner, repo, data["default_branch"]
-                )
-                latest_commit = get_latest_commit(owner, repo)
-                contributors = get_contributors(owner, repo)
-                issues = get_open_issues(owner, repo)
+def safe_call(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except Exception as error:
+        st.error(f"{function.__name__} failed: {error}")
+        return None
 
-            st.session_state["repo_data"] = data
-            st.session_state["repo_languages"] = languages
-            st.session_state["repo_tree"] = tree
-            st.session_state["repo_readme"] = readme
-            st.session_state["repo_commit"] = latest_commit
-            st.session_state["repo_contributors"] = contributors
-            st.session_state["repo_issues"] = issues
-            st.session_state["repo_error"] = None
 
-            # Clear previous file-explanation results for the new repository.
-            st.session_state.pop("explained_source", None)
-            st.session_state.pop("explained_path", None)
-            st.session_state.pop("explain_error", None)
+def show_repository_overview(data):
+    if not isinstance(data, dict):
+        st.warning("Repository information is unavailable.")
+        return
 
-        except (ValueError, KeyError) as error:
-            st.session_state["repo_error"] = str(error)
-
-        except Exception as error:
-            st.session_state["repo_error"] = (
-                f"Could not analyze this repository: {error}"
-            )
-
-if st.session_state.get("repo_error"):
-    st.error(st.session_state["repo_error"])
-
-data = st.session_state.get("repo_data")
-
-if data:
-    languages = st.session_state.get("repo_languages", {})
-    tree = st.session_state.get("repo_tree", [])
-    readme = st.session_state.get("repo_readme")
-    latest_commit = st.session_state.get("repo_commit")
-    contributors = st.session_state.get("repo_contributors", [])
-    issues = st.session_state.get("repo_issues", [])
-
-    st.success("Repository loaded successfully!")
-
-    st.header(f"📦 {data.get('full_name', 'Repository')}")
+    st.markdown("### 📊 Project Overview")
+    st.subheader(data.get("full_name", data.get("name", "Repository")))
     st.write(data.get("description") or "No description provided.")
-
-    st.link_button(
-        "Open on GitHub",
-        data.get("html_url", "https://github.com"),
-    )
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("⭐ Stars", data.get("stargazers_count", 0))
     col2.metric("🍴 Forks", data.get("forks_count", 0))
-    col3.metric("🐛 Open issues", data.get("open_issues_count", 0))
-    col4.metric("👥 Watchers", data.get("subscribers_count", 0))
+    col3.metric("🐛 Open Issues", data.get("open_issues_count", 0))
+    col4.metric("👁 Watchers", data.get("watchers_count", 0))
 
-    st.write(
-        "**Primary language:**",
-        data.get("language") or "Not specified",
+    col1, col2 = st.columns(2)
+    col1.write("**Primary language**")
+    col1.write(data.get("language") or "Not specified")
+    col2.write("**Default branch**")
+    col2.write(data.get("default_branch", "main"))
+
+    if data.get("html_url"):
+        st.markdown(f"[View repository on GitHub]({data['html_url']})")
+
+
+def display_file_tree(tree):
+    if not isinstance(tree, list) or not tree:
+        st.info("No files were returned.")
+        return
+
+    st.caption(f"{len(tree)} file and folder entries")
+
+    search_text = st.text_input(
+        "Filter files",
+        placeholder="Search README, app.py, src...",
+        key="file_filter",
     )
-    st.write("**Default branch:**", data.get("default_branch", "Unknown"))
 
-    license_info = data.get("license")
-    license_name = (
-        license_info.get("spdx_id") or license_info.get("name")
-        if license_info
-        else "Not specified"
-    )
-    st.write("**License:**", license_name)
+    filtered = [
+        item for item in tree
+        if isinstance(item, dict)
+        and search_text.lower() in item.get("path", "").lower()
+    ]
 
-    (
-        overview_tab,
-        files_tab,
-        explain_tab,
-        qa_tab,
-        commits_tab,
-        contributors_tab,
-        issues_tab,
-    ) = st.tabs([
-        "📘 Project Explainer",
-        "📂 File Explorer",
-        "💡 Explain Any File",
-        "💬 Repository Q&A",
-        "🕒 Latest Commit",
-        "👥 Contributors",
-        "🐛 Open Issues",
-    ])
+    for item in filtered[:300]:
+        icon = "📁" if item.get("type") == "tree" else "📄"
+        st.text(f"{icon}  {item.get('path', 'Unknown path')}")
 
-    # --------------------------------------------------
-    # TAB 1: PROJECT EXPLAINER
-    # --------------------------------------------------
-    with overview_tab:
-        st.subheader("Understand This Project")
 
-        if readme:
-            lines = readme.splitlines()
-            summary_parts = []
+def display_latest_commit(commit):
+    if not isinstance(commit, dict):
+        st.info("No commit information is available.")
+        return
 
-            for line in lines:
-                cleaned = line.strip()
+    st.markdown("#### Latest commit message")
+    st.write(commit.get("message", "No message"))
 
-                if not cleaned:
-                    continue
-                if cleaned.startswith("#"):
-                    continue
-                if cleaned.startswith("![") or cleaned.startswith("[!["):
-                    continue
-                if cleaned.startswith("<"):
-                    continue
+    col1, col2 = st.columns(2)
+    col1.metric("Commit ID", commit.get("sha") or "Unknown")
+    col2.write("**Author**")
+    col2.write(commit.get("author") or "Unknown")
 
-                summary_parts.append(cleaned)
+    st.write("**Date:**", commit.get("date") or "Unknown")
 
-                if len(" ".join(summary_parts)) >= 700:
-                    break
+    if commit.get("url"):
+        st.markdown(f"[View commit on GitHub]({commit['url']})")
 
-            summary = " ".join(summary_parts)
-            summary = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", summary)
-            summary = re.sub(r"[*`_]", "", summary)
 
-            st.markdown("### Beginner-friendly overview")
+def display_contributors(people):
+    if not isinstance(people, list) or not people:
+        st.info("No contributors were found.")
+        return
 
-            if summary:
-                st.write(summary[:1000])
-            else:
-                st.info(
-                    "The README is available, but a short summary "
-                    "could not be extracted automatically."
-                )
+    for person in people:
+        if not isinstance(person, dict):
+            continue
 
-            with st.expander("Read the full README"):
-                st.markdown(readme[:12000])
+        username = person.get("login", "Unknown")
+        url = person.get("html_url", "")
+        contributions = person.get("contributions", 0)
 
-                if len(readme) > 12000:
-                    st.caption(
-                        "Preview limited to the first 12,000 characters."
-                    )
-        else:
-            st.info("This repository does not have a readable README.")
+        with st.container(border=True):
+            col1, col2 = st.columns([3, 1])
 
-        st.markdown("### Programming languages")
+            with col1:
+                if url:
+                    st.markdown(f"**[{username}]({url})**")
+                else:
+                    st.markdown(f"**{username}**")
 
-        if languages:
-            total = sum(languages.values())
+            with col2:
+                st.metric("Contributions", contributions)
 
-            if total:
-                percentages = {
-                    name: round(count / total * 100, 1)
-                    for name, count in languages.items()
-                }
-                st.bar_chart(percentages)
-                st.json(percentages)
-            else:
-                st.info("Language statistics are unavailable.")
-        else:
-            st.info("No language statistics were returned.")
 
-        st.markdown("### Suggested starting points")
-        st.write(
-            "1. Read the README to understand the project's purpose.\n"
-            "2. Look for files such as `main.py`, `app.py`, or `index.js`.\n"
-            "3. Check `requirements.txt`, `pyproject.toml`, or `package.json` "
-            "to discover dependencies.\n"
-            "4. Explore the tests folder to see how the project is checked."
-        )
+def display_issues(issues):
+    if not isinstance(issues, list):
+        st.warning("GitHub returned an unexpected issues response.")
+        return
 
-    # --------------------------------------------------
-    # TAB 2: FILE EXPLORER
-    # --------------------------------------------------
-    with files_tab:
-        st.subheader("Repository File Explorer")
+    if not issues:
+        st.success("No open issues found.")
+        return
 
-        if tree:
-            files = [
-                item for item in tree
-                if item.get("type") == "blob"
+    st.caption(f"{len(issues)} open issues")
+
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+
+        title = issue.get("title", "Untitled issue")
+        number = issue.get("number", "?")
+        author = (issue.get("user") or {}).get("login", "Unknown")
+        url = issue.get("html_url", "")
+        labels = issue.get("labels", [])
+
+        with st.container(border=True):
+            st.markdown(f"#### #{number} — {title}")
+            st.caption(f"Opened by {author}")
+
+            label_names = [
+                label.get("name", "")
+                for label in labels
+                if isinstance(label, dict) and label.get("name")
             ]
 
-            search_text = st.text_input(
-                "Search files by name",
-                key="file_search",
-            )
+            if label_names:
+                st.write("**Labels:** " + ", ".join(label_names))
 
-            if search_text:
-                files = [
-                    item for item in files
-                    if search_text.lower() in item["path"].lower()
-                ]
+            st.caption(f"Comments: {issue.get('comments', 0)}")
 
-            st.caption(f"{len(files)} matching files")
+            if url:
+                st.markdown(f"[View issue on GitHub]({url})")
 
-            for item in files[:150]:
-                st.text("📄 " + item["path"])
 
-            if len(files) > 150:
-                st.caption("Showing the first 150 matching files.")
-        else:
-            st.info("No repository files were returned.")
+def display_readme(readme):
+    if isinstance(readme, str) and readme.strip():
+        st.markdown(readme)
+    else:
+        st.info("This repository does not have an available README.")
 
-    # --------------------------------------------------
-    # TAB 3: EXPLAIN ANY FILE
-    # --------------------------------------------------
-    with explain_tab:
-        st.subheader("💡 Explain Any File")
-        st.write(
-            "Choose a file from the repository to view its code "
-            "and understand its purpose in beginner-friendly language."
+
+def display_answer(answer):
+    if isinstance(answer, str):
+        st.markdown(answer)
+    elif isinstance(answer, dict):
+        # Prefer common answer fields instead of rendering raw JSON.
+        for key in ("answer", "response", "explanation", "result"):
+            if isinstance(answer.get(key), str):
+                st.markdown(answer[key])
+                return
+        st.write(answer)
+    else:
+        st.write(answer)
+
+
+# --------------------------------------------------
+# SESSION STATE
+# --------------------------------------------------
+
+defaults = {
+    "cc_repo_url": "",
+    "cc_repo_data": None,
+    "cc_owner": "",
+    "cc_repo": "",
+    "cc_branch": "main",
+    "cc_file_tree": None,
+    "cc_readme": None,
+    "cc_latest_commit": None,
+    "cc_contributors": None,
+    "cc_open_issues": None,
+    "cc_beginner_issues": None,
+    "cc_file_content": None,
+    "cc_current_file": "",
+}
+
+for key, value in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
+
+
+# --------------------------------------------------
+# HOMEPAGE
+# --------------------------------------------------
+
+st.markdown(
+    """
+    <div class="cc-hero">
+        <div class="cc-brand">🧭 CODECOMPASS / DEVELOPER TOOLS</div>
+        <div class="cc-heading">
+            Navigate any codebase.<br>
+            <span class="cc-accent">Build with confidence.</span>
+        </div>
+        <div class="cc-description">
+            Explore GitHub repositories, understand source files,
+            ask questions about code, and discover your first
+            open-source contribution.
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown("### 🔗 Connect a GitHub repository")
+
+repo_url = st.text_input(
+    "Public GitHub repository URL",
+    placeholder="https://github.com/owner/repository",
+    key="homepage_repo_url",
+)
+
+if st.button("🧭 Analyze Repository", type="primary", use_container_width=True):
+    try:
+        owner, repo = parse_repo_url(repo_url.strip())
+        data = safe_call(get_repo_data, repo_url.strip())
+
+        if isinstance(data, dict):
+            st.session_state.cc_repo_url = repo_url.strip()
+            st.session_state.cc_owner = owner
+            st.session_state.cc_repo = repo
+            st.session_state.cc_repo_data = data
+            st.session_state.cc_branch = data.get("default_branch") or "main"
+
+            # Reset data belonging to the previously selected repository.
+            for key in (
+                "cc_file_tree",
+                "cc_readme",
+                "cc_latest_commit",
+                "cc_contributors",
+                "cc_open_issues",
+                "cc_beginner_issues",
+                "cc_file_content",
+            ):
+                st.session_state[key] = None
+
+            st.success("Repository loaded successfully.")
+
+    except Exception as error:
+        st.error(f"Could not analyze this repository: {error}")
+
+
+# --------------------------------------------------
+# EMPTY HOMEPAGE
+# --------------------------------------------------
+
+if not st.session_state.cc_repo_data:
+    st.markdown("### ✨ What you can do")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.markdown("#### 🧠 Understand code")
+        st.write("Get a beginner-friendly explanation of source files.")
+
+    with col2:
+        st.markdown("#### 📂 Explore files")
+        st.write("Browse the repository and inspect its file contents.")
+
+    with col3:
+        st.markdown("#### 🚀 Start contributing")
+        st.write("Explore open issues and learn contribution steps.")
+
+
+# --------------------------------------------------
+# REPOSITORY WORKSPACE
+# --------------------------------------------------
+
+if st.session_state.cc_repo_data:
+
+    owner = st.session_state.cc_owner
+    repo = st.session_state.cc_repo
+    branch = st.session_state.cc_branch
+
+    st.divider()
+    st.caption(f"Selected repository: {owner}/{repo}")
+
+    show_repository_overview(st.session_state.cc_repo_data)
+
+    tabs = st.tabs([
+        "📁 File Explorer",
+        "📄 README",
+        "🧾 Latest Commit",
+        "👥 Contributors",
+        "🐛 Open Issues",
+        "✨ First Contributions",
+        "🤖 AI Assistant",
+    ])
+
+    # FILE EXPLORER
+    with tabs[0]:
+        st.markdown("### 📁 File Explorer")
+
+        if st.button("Load File Tree", key="load_tree"):
+            result = safe_call(get_file_tree, owner, repo, branch)
+            if result is not None:
+                st.session_state.cc_file_tree = result
+
+        if st.session_state.cc_file_tree is not None:
+            display_file_tree(st.session_state.cc_file_tree)
+
+        st.divider()
+        st.markdown("### Read a File")
+
+        file_path = st.text_input(
+            "Exact file path",
+            placeholder="README.md or src/main.py",
+            key="cc_file_path",
         )
 
-        supported_extensions = (
-            ".py", ".js", ".jsx", ".ts", ".tsx",
-            ".html", ".css", ".json", ".yml", ".yaml",
-            ".toml", ".md", ".txt",
-        )
-
-        if tree:
-            source_files = sorted(
-                [
-                    item["path"]
-                    for item in tree
-                    if item.get("type") == "blob"
-                    and item.get("path", "").lower().endswith(
-                        supported_extensions
-                    )
-                ]
-            )
-
-            if source_files:
-                selected_path = st.selectbox(
-                    "Choose a file to explain",
-                    source_files,
-                    key="explain_file_path",
+        if st.button("Read File", key="read_file"):
+            if not file_path.strip():
+                st.warning("Enter a file path.")
+            else:
+                content = safe_call(
+                    get_file_content,
+                    owner,
+                    repo,
+                    file_path.strip(),
+                    branch,
                 )
 
-                if st.button(
-                    "Load and Explain File",
-                    type="primary",
-                    key="load_explain_file",
-                ):
-                    try:
-                        with st.spinner("Loading file from GitHub..."):
-                            owner = data["owner"]["login"]
-                            repo = data["name"]
+                if isinstance(content, str):
+                    st.session_state.cc_file_content = content
+                    st.session_state.cc_current_file = file_path.strip()
 
-                            source = get_file_content(
-                                owner,
-                                repo,
-                                selected_path,
-                                data["default_branch"],
-                            )
+        if st.session_state.cc_file_content is not None:
+            st.markdown(f"#### {st.session_state.cc_current_file}")
+            st.code(st.session_state.cc_file_content)
 
-                        st.session_state["explained_source"] = source
-                        st.session_state["explained_path"] = selected_path
-                        st.session_state["explain_error"] = None
+            if st.button("Explain This File", key="explain_file"):
+                explanation = safe_call(
+                    explain_file,
+                    st.session_state.cc_file_content,
+                )
+                if explanation is not None:
+                    st.markdown("### 🧠 Explanation")
+                    display_answer(explanation)
 
-                    except Exception as error:
-                        st.session_state["explain_error"] = str(error)
-                        st.session_state.pop("explained_source", None)
-                        st.session_state.pop("explained_path", None)
+    # README
+    with tabs[1]:
+        st.markdown("### 📄 Project Documentation")
 
-                if st.session_state.get("explain_error"):
-                    st.error(st.session_state["explain_error"])
+        if st.button("Load README", key="load_readme"):
+            result = safe_call(get_readme, owner, repo)
+            if result is not None:
+                st.session_state.cc_readme = result
 
-                if (
-                    st.session_state.get("explained_path") == selected_path
-                    and st.session_state.get("explained_source") is not None
-                ):
-                    source = st.session_state["explained_source"]
-                    explanation = explain_file(selected_path, source)
+        if st.session_state.cc_readme is not None:
+            display_readme(st.session_state.cc_readme)
 
-                    st.divider()
-                    st.markdown("### 📝 What this file does")
-                    st.write(explanation["purpose"])
+    # LATEST COMMIT
+    with tabs[2]:
+        st.markdown("### 🧾 Latest Repository Update")
 
-                    st.markdown("### 🔍 What was detected")
+        if st.button("Load Latest Commit", key="load_commit"):
+            result = safe_call(get_latest_commit, owner, repo)
+            if result is not None:
+                st.session_state.cc_latest_commit = result
 
-                    for detail in explanation["details"]:
-                        st.write("• " + detail)
+        if st.session_state.cc_latest_commit is not None:
+            display_latest_commit(st.session_state.cc_latest_commit)
 
-                    st.markdown("### 💻 Source code")
+    # CONTRIBUTORS
+    with tabs[3]:
+        st.markdown("### 👥 Project Contributors")
 
-                    extension = selected_path.lower().rsplit(".", 1)[-1]
+        limit = st.selectbox(
+            "Number of contributors",
+            [5, 10, 20, 30],
+            index=1,
+            key="contributor_limit",
+        )
 
-                    language_map = {
-                        "py": "python",
-                        "js": "javascript",
-                        "jsx": "javascript",
-                        "ts": "typescript",
-                        "tsx": "typescript",
-                        "html": "html",
-                        "css": "css",
-                        "json": "json",
-                        "yml": "yaml",
-                        "yaml": "yaml",
-                        "toml": "toml",
-                        "md": "markdown",
-                    }
+        if st.button("Load Contributors", key="load_contributors"):
+            result = safe_call(get_contributors, owner, repo, limit)
+            if result is not None:
+                st.session_state.cc_contributors = result
 
-                    st.code(
-                        source[:20000],
-                        language=language_map.get(extension, "text"),
-                    )
+        if st.session_state.cc_contributors is not None:
+            display_contributors(st.session_state.cc_contributors)
 
-                    if len(source) > 20000:
-                        st.caption(
-                            "The preview shows the first 20,000 characters."
-                        )
+    # OPEN ISSUES
+    with tabs[4]:
+        st.markdown("### 🐛 Open Issues")
+        st.caption("Explore reported problems and possible improvements.")
+
+        if st.button("Load Open Issues", key="load_issues"):
+            result = safe_call(get_open_issues, owner, repo, 20)
+            if result is not None:
+                st.session_state.cc_open_issues = result
+
+        if st.session_state.cc_open_issues is not None:
+            display_issues(st.session_state.cc_open_issues)
+
+    # FIRST CONTRIBUTIONS
+    with tabs[5]:
+        st.markdown("### ✨ First Contribution Guide")
+
+        source = st.radio(
+            "Search for beginner issues in",
+            ["Selected repository", "Other public repositories"],
+            key="issue_source",
+        )
+
+        issue_limit = st.slider(
+            "Maximum issues",
+            min_value=3,
+            max_value=20,
+            value=10,
+            key="issue_limit",
+        )
+
+        if st.button("Find Beginner Issues", key="find_issues"):
+            if source == "Selected repository":
+                result = safe_call(
+                    get_beginner_issues,
+                    owner,
+                    repo,
+                    issue_limit,
+                )
             else:
-                st.info("No supported text files were found in this repository.")
-        else:
-            st.info("Analyze a repository first to choose a file.")
+                result = safe_call(search_global_beginner_issues, issue_limit)
 
-    # --------------------------------------------------
+            if result is not None:
+                st.session_state.cc_beginner_issues = result
 
-    # --------------------------------------------------
-    # TAB: REPOSITORY Q&A
-    # --------------------------------------------------
-    with qa_tab:
-        st.subheader("💬 Ask Questions About This Repository")
-        st.write(
-            "Search the repository for relevant code and file locations. "
-            "These are keyword-based search results, not AI-generated answers."
+        issues = st.session_state.cc_beginner_issues
+
+        if isinstance(issues, list) and issues:
+            issue_options = {}
+
+            for item in issues:
+                if isinstance(item, dict):
+                    label = (
+                        f"#{item.get('number', '?')} — "
+                        f"{item.get('title', 'Untitled issue')}"
+                    )
+                    issue_options[label] = item
+
+            if issue_options:
+                selected = st.selectbox(
+                    "Choose an issue",
+                    list(issue_options.keys()),
+                    key="selected_beginner_issue",
+                )
+
+                issue = issue_options[selected]
+                st.write(issue.get("body") or "No issue description.")
+
+                if issue.get("html_url"):
+                    st.markdown(f"[View issue on GitHub]({issue['html_url']})")
+
+                if st.button("Generate Contribution Steps"):
+                    steps = safe_call(make_contribution_steps, issue)
+                    if steps is not None:
+                        st.markdown("### Your Contribution Steps")
+                        display_answer(steps)
+
+        elif issues is not None:
+            st.info("No beginner issues were returned.")
+            if not isinstance(issues, list):
+                st.write(issues)
+
+    # AI ASSISTANT
+    
+    # AI ASSISTANT
+    
+    # AI ASSISTANT
+    with tabs[6]:
+        st.markdown("### 🤖 AI Repository Assistant")
+        st.caption(
+            "Ask questions about the selected GitHub repository."
         )
 
-        question = st.text_input(
-            "What would you like to know?",
-            placeholder="Example: Where is the main function?",
-            key="repository_qa_question",
+        question = st.text_area(
+            "Your question",
+            placeholder="What does this project do?",
+            key="cc_ai_question",
         )
 
-        if st.button("Search Repository", key="search_repository_button"):
+        if st.button(
+            "Ask CodeCompass AI",
+            type="primary",
+            key="ask_ai",
+        ):
             if not question.strip():
-                st.warning("Please enter a question.")
+                st.warning("Enter a question first.")
+
+            elif not owner or not repo:
+                st.warning("Please analyze a repository first.")
+
             else:
                 try:
-                    with st.spinner("Searching repository files..."):
-                        owner = data["owner"]["login"]
-                        repo = data["name"]
-                        branch = data["default_branch"]
+                    with st.spinner("Loading repository files..."):
+                        tree = get_file_tree(owner, repo, branch)
 
-                        searchable_extensions = (
-                            ".py", ".js", ".jsx", ".ts", ".tsx",
-                            ".html", ".css", ".md", ".txt",
+                        if not isinstance(tree, list):
+                            st.error("Could not load the repository file tree.")
+                            st.stop()
+
+                        files = {}
+                        supported_extensions = (
+                            ".py", ".md", ".txt", ".js", ".ts",
+                            ".jsx", ".tsx", ".html", ".css",
+                            ".json", ".yml", ".yaml", ".toml",
                         )
 
-                        candidate_paths = [
-                            item["path"]
-                            for item in tree
-                            if item.get("type") == "blob"
-                            and item.get("path", "").lower().endswith(
-                                searchable_extensions
-                            )
-                        ]
+                        for item in tree:
+                            if not isinstance(item, dict):
+                                continue
 
-                        # Prefer likely entry points and documentation.
-                        candidate_paths.sort(
-                            key=lambda path: (
-                                0 if path.lower().endswith(
-                                    ("readme.md", "app.py", "main.py", "index.js")
-                                ) else 1,
-                                path.lower(),
-                            )
-                        )
+                            path = item.get("path", "")
 
-                        # Limit work so a large repository does not trigger
-                        # hundreds of GitHub API requests.
-                        candidate_paths = candidate_paths[:20]
-
-                        searchable_files = {}
-                        file_errors = []
-
-                        for path in candidate_paths:
-                            try:
-                                content = get_text_file_for_qa(
+                            if (
+                                item.get("type") == "blob"
+                                and path.lower().endswith(supported_extensions)
+                            ):
+                                content = get_file_content(
                                     owner, repo, path, branch
                                 )
-                                if content:
-                                    searchable_files[path] = content
-                            except Exception:
-                                file_errors.append(path)
 
-                        matches = search_repository(
-                            question, searchable_files
+                                if (
+                                    isinstance(content, str)
+                                    and content.strip()
+                                ):
+                                    files[path] = content
+
+                    if not files:
+                        st.warning(
+                            "No readable text files were found "
+                            "in this repository."
                         )
 
-                    st.session_state["qa_matches"] = matches
-                    st.session_state["qa_question"] = question
-                    st.session_state["qa_error"] = None
-                    st.session_state["qa_files_searched"] = len(
-                        searchable_files
-                    )
-                    st.session_state["qa_file_errors"] = len(file_errors)
+                    else:
+                        with st.spinner("Searching repository..."):
+                            results = search_repository(
+                                question.strip(),
+                                files,
+                                max_results=10,
+                            )
+
+                        # Use matching lines when available.
+                        if results:
+                            context_parts = []
+
+                            for result in results:
+                                context_parts.append(
+                                    f"File: {result['path']}\n"
+                                    f"Line {result['line_number']}: "
+                                    f"{result['line']}"
+                                )
+
+                            context = "\n\n".join(context_parts)
+
+                            st.markdown("### 🔎 Relevant code")
+
+                            for result in results:
+                                st.caption(
+                                    f"{result['path']} — "
+                                    f"line {result['line_number']}"
+                                )
+                                st.code(result["line"])
+
+                        else:
+                            # Fall back to actual repository contents
+                            # if keyword search finds no matching lines.
+                            context_parts = []
+
+                            for path, content in list(files.items())[:8]:
+                                context_parts.append(
+                                    f"File: {path}\n{content[:2500]}"
+                                )
+
+                            context = "\n\n".join(context_parts)
+
+                            st.info(
+                                "No exact keyword matches found. "
+                                "The assistant will use available "
+                                "repository files to answer."
+                            )
+
+                        if not context.strip():
+                            st.warning(
+                                "No repository context is available "
+                                "to answer this question."
+                            )
+                        else:
+                            with st.spinner("Generating AI answer..."):
+                                answer = answer_repository_question(
+                                    question.strip(),
+                                    context,
+                                )
+
+                            st.markdown("### 💡 Answer")
+                            display_answer(answer)
 
                 except Exception as error:
-                    st.session_state["qa_error"] = str(error)
+                    st.error(f"AI Assistant error: {error}")
 
-        if st.session_state.get("qa_error"):
-            st.error(st.session_state["qa_error"])
 
-        if st.session_state.get("qa_question"):
-            st.markdown(
-                f"### Search results for: "
-                f"{st.session_state['qa_question']}"
-            )
-            st.caption(
-                f"Searched {st.session_state.get('qa_files_searched', 0)} files."
-            )
+# --------------------------------------------------
+# FOOTER
+# --------------------------------------------------
 
-            if st.session_state.get("qa_file_errors", 0):
-                st.caption(
-                    "Some files could not be loaded; results may be incomplete."
-                )
-
-            matches = st.session_state.get("qa_matches", [])
-
-            if matches:
-                for match in matches:
-                    st.markdown(
-                        f"**`{match['path']}` — line "
-                        f"{match['line_number']}**"
-                    )
-                    st.code(match["line"], language="text")
-            else:
-                st.info(
-                    "No matching lines were found in the files searched. "
-                    "Try different keywords, or inspect the File Explorer."
-                )
-
-    # TAB 4: LATEST COMMIT
-    # --------------------------------------------------
-    with commits_tab:
-        st.subheader("Latest Commit")
-
-        if latest_commit:
-            st.write("**Message:**", latest_commit["message"])
-            st.write("**Author:**", latest_commit["author"])
-            st.write("**Date:**", latest_commit["date"])
-            st.write("**Commit ID:**", latest_commit["sha"])
-
-            if latest_commit.get("url"):
-                st.link_button(
-                    "View commit on GitHub",
-                    latest_commit["url"],
-                )
-        else:
-            st.info("No commit history was returned.")
-
-    # --------------------------------------------------
-    # TAB 5: CONTRIBUTORS
-    # --------------------------------------------------
-    with contributors_tab:
-        st.subheader("Repository Contributors")
-
-        if contributors:
-            for person in contributors:
-                login = person.get("login", "Unknown")
-                profile_url = person.get("html_url", "")
-                contribution_count = person.get("contributions", 0)
-
-                if profile_url:
-                    st.markdown(
-                        f"- [{login}]({profile_url}) — "
-                        f"{contribution_count} contributions"
-                    )
-                else:
-                    st.write(
-                        f"- {login} — {contribution_count} contributions"
-                    )
-        else:
-            st.info("No contributors were returned.")
-
-    # --------------------------------------------------
-    # TAB 6: OPEN ISSUES
-    # --------------------------------------------------
-    with issues_tab:
-        st.subheader("Open Issues")
-
-        if issues:
-            for issue in issues:
-                title = issue.get("title", "Untitled")
-                issue_url = issue.get("html_url", "")
-                issue_number = issue.get("number", "?")
-
-                if issue_url:
-                    st.markdown(f"**[#{issue_number} — {title}]({issue_url})**")
-                else:
-                    st.markdown(f"**#{issue_number} — {title}**")
-
-                labels = [
-                    label.get("name", "")
-                    for label in issue.get("labels", [])
-                ]
-
-                st.caption(
-                    "Labels: " + (", ".join(labels) if labels else "None")
-                )
-        else:
-            st.info("There are no open issues to display.")
+st.divider()
+st.caption(
+    "🧭 CodeCompass • Understand any repository. "
+    "Start contributing with confidence."
+)

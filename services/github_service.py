@@ -16,6 +16,9 @@ BASE_HEADERS = {
 
 def parse_repo_url(repo_url):
     """Extract owner and repository name from a GitHub URL."""
+    if not isinstance(repo_url, str) or not repo_url.strip():
+        raise ValueError("Enter a GitHub repository URL.")
+
     repo_url = repo_url.strip()
 
     if repo_url.startswith("github.com/"):
@@ -24,7 +27,7 @@ def parse_repo_url(repo_url):
     parsed = urlparse(repo_url)
 
     if parsed.scheme not in ("http", "https"):
-        raise ValueError("Enter a valid GitHub repository URL.")
+        raise ValueError("Enter a valid HTTPS GitHub repository URL.")
 
     if parsed.hostname not in ("github.com", "www.github.com"):
         raise ValueError("Please use a URL from github.com.")
@@ -33,7 +36,7 @@ def parse_repo_url(repo_url):
 
     if len(parts) != 2 or not all(parts):
         raise ValueError(
-            "Use a URL like https://github.com/owner/repository"
+            "Use this format: https://github.com/owner/repository"
         )
 
     owner, repo = parts
@@ -46,9 +49,8 @@ def parse_repo_url(repo_url):
 
 
 def get_headers():
-    """Build request headers without exposing or requiring a token."""
+    """Build GitHub API headers."""
     headers = BASE_HEADERS.copy()
-
     token = os.getenv("GITHUB_TOKEN", "")
 
     if not token:
@@ -57,7 +59,6 @@ def get_headers():
         except Exception:
             token = ""
 
-    # Ignore the placeholder used in a fresh project setup.
     if token and token != "paste_your_token_here":
         headers["Authorization"] = f"Bearer {token}"
 
@@ -65,61 +66,40 @@ def get_headers():
 
 
 def github_get(endpoint, params=None):
-    """Fetch JSON from GitHub and handle common API errors."""
+    """Request data from the GitHub API."""
     url = f"{GITHUB_API}/{endpoint.lstrip('/')}"
 
     try:
-        headers = get_headers()
-
         response = requests.get(
             url,
-            headers=headers,
+            headers=get_headers(),
             params=params,
             timeout=20,
         )
 
-        # If a configured token is invalid, retry public access
-        # without it. This keeps public repository analysis usable.
-        if response.status_code == 401 and "Authorization" in headers:
-            response = requests.get(
-                url,
-                headers=BASE_HEADERS,
-                params=params,
-                timeout=20,
-            )
-
         if response.status_code == 401:
             raise ValueError(
-                "GitHub rejected the request. Check your token in "
-                ".streamlit/secrets.toml, or remove the invalid token "
-                "to use public repository access."
+                "GitHub rejected the request. Check your GitHub token."
             )
 
         if response.status_code == 403:
-            remaining = response.headers.get("X-RateLimit-Remaining")
-
-            if remaining == "0":
+            if response.headers.get("X-RateLimit-Remaining") == "0":
                 raise ValueError(
-                    "GitHub API rate limit reached. Wait and try again."
+                    "GitHub API rate limit reached. Please wait and retry."
                 )
-
-            raise ValueError(
-                "GitHub denied this request. Try again later."
-            )
+            raise ValueError("GitHub denied the request. Try again later.")
 
         if response.status_code == 404:
             raise ValueError(
-                "Repository or resource not found. Check the URL "
-                "and make sure the repository is public."
+                "Repository or resource not found. Check the URL and "
+                "ensure the repository is public."
             )
 
         response.raise_for_status()
         return response.json()
 
     except requests.exceptions.Timeout as error:
-        raise ValueError(
-            "GitHub took too long to respond. Please try again."
-        ) from error
+        raise ValueError("GitHub took too long to respond.") from error
 
     except requests.exceptions.ConnectionError as error:
         raise ValueError(
@@ -127,36 +107,32 @@ def github_get(endpoint, params=None):
         ) from error
 
     except requests.exceptions.HTTPError as error:
-        raise ValueError(
-            f"GitHub returned an HTTP error: {error}"
-        ) from error
+        raise ValueError(f"GitHub HTTP error: {error}") from error
 
 
 def get_repo_data(repo_url):
-    """Get the main repository details."""
+    """Return the repository's main details."""
     owner, repo = parse_repo_url(repo_url)
     return github_get(f"repos/{owner}/{repo}")
 
 
 def get_languages(owner, repo):
-    """Get language byte counts for a repository."""
+    """Return language byte counts."""
     return github_get(f"repos/{owner}/{repo}/languages")
 
 
-def get_file_tree(owner, repo, branch):
-    """Get repository files and folders."""
+def get_file_tree(owner, repo, branch="main"):
+    """Return files and folders on a branch."""
     encoded_branch = quote(branch, safe="")
-
     result = github_get(
         f"repos/{owner}/{repo}/git/trees/{encoded_branch}",
         params={"recursive": "1"},
     )
-
     return result.get("tree", [])
 
 
 def get_readme(owner, repo):
-    """Get and decode the repository README."""
+    """Return decoded README text."""
     try:
         result = github_get(f"repos/{owner}/{repo}/readme")
         content = result.get("content", "")
@@ -176,7 +152,7 @@ def get_readme(owner, repo):
 
 
 def get_latest_commit(owner, repo):
-    """Get the latest commit details."""
+    """Return details of the latest commit."""
     commits = github_get(
         f"repos/{owner}/{repo}/commits",
         params={"per_page": 1},
@@ -203,7 +179,7 @@ def get_latest_commit(owner, repo):
 
 
 def get_contributors(owner, repo, limit=10):
-    """Get the repository's top contributors."""
+    """Return repository contributors."""
     return github_get(
         f"repos/{owner}/{repo}/contributors",
         params={"per_page": limit},
@@ -211,7 +187,7 @@ def get_contributors(owner, repo, limit=10):
 
 
 def get_open_issues(owner, repo, limit=20):
-    """Get open issues, excluding pull requests."""
+    """Return open issues, excluding pull requests."""
     issues = github_get(
         f"repos/{owner}/{repo}/issues",
         params={"state": "open", "per_page": limit},
@@ -222,43 +198,47 @@ def get_open_issues(owner, repo, limit=20):
         if "pull_request" not in issue
     ]
 
-def get_file_content(owner, repo, path, branch):
-    """Fetch and decode a text file from a public GitHub repository."""
-    import base64
-    from urllib.parse import quote
 
+def get_file_content(owner, repo, path, branch="main"):
+    """Fetch and decode a text file."""
     encoded_path = quote(path, safe="/")
-    encoded_branch = quote(branch, safe="")
 
     result = github_get(
         f"repos/{owner}/{repo}/contents/{encoded_path}",
         params={"ref": branch},
     )
 
-def get_text_file_for_qa(owner, repo, path, branch, max_chars=12000):
-    """Fetch a text file for repository search, with a size limit."""
-    content = get_file_content(owner, repo, path, branch)
+    if not isinstance(result, dict):
+        raise ValueError("GitHub returned an unexpected response.")
 
-    if not isinstance(content, str):
-        return ""
+    if result.get("type") != "file":
+        raise ValueError("The selected path is not a file.")
 
-    return content[:max_chars]
-
-    # GitHub returns file contents as Base64.
     content = result.get("content", "")
     encoding = result.get("encoding", "")
 
     if encoding != "base64" or not content:
-        raise ValueError(
-            "This file cannot be previewed as ordinary text."
-        )
+        raise ValueError("This file cannot be previewed as ordinary text.")
 
     try:
-        decoded = base64.b64decode(content).decode(
+        return base64.b64decode(content).decode(
             "utf-8",
             errors="replace",
         )
     except Exception as error:
         raise ValueError("Could not decode this file.") from error
 
-    return decoded
+
+def get_text_file_for_qa(
+    owner, repo, path, branch="main", max_chars=12000
+):
+    """Return text content for repository Q&A."""
+    try:
+        content = get_file_content(owner, repo, path, branch)
+    except Exception:
+        return ""
+
+    if not isinstance(content, str):
+        return ""
+
+    return content[:max_chars]
