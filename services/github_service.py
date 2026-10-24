@@ -312,3 +312,34 @@ def get_file_content(owner, repo, path, branch="main"):
         raise ValueError("Could not decode this file.") from error
 
 
+def get_text_file_for_qa(
+    owner, repo, path, branch="main", max_chars=12000
+):
+    """Return text content for repository Q&A."""
+
+    supported_extensions = (
+        ".py", ".md", ".txt", ".js", ".ts",
+        ".jsx", ".tsx", ".html", ".css",
+        ".json", ".yml", ".yaml", ".toml",
+        ".java", ".c", ".cpp", ".h", ".go",
+        ".rs", ".php", ".rb", ".sh",
+    )
+
+    if not isinstance(path, str) or not path.strip():
+        return ""
+
+    if not path.lower().endswith(supported_extensions):
+        return ""
+
+    try:
+        content = get_file_content(
+            owner, repo, path, branch
+        )
+    except Exception:
+        return ""
+
+    if not isinstance(content, str) or not content.strip():
+        return ""
+
+    return content[:max_chars]
+
